@@ -6,203 +6,295 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
+import io 
+import tempfile
 
 # LangChain specific imports
-from langchain_community.document_loaders import PyPDFLoader # Only PDF loader needed for this specific app
-from langchain_core.documents import Document
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains import create_retrieval_chain
+# MODIFIED: Removed create_stuff_documents_chain and create_retrieval_chain as ConversationalRetrievalChain handles this
+from langchain_core.prompts import PromptTemplate # Changed from ChatPromptTemplate for combine_docs_chain
+from langchain.chains import ConversationalRetrievalChain # MODIFIED: Added
+from langchain.memory import ConversationBufferMemory # MODIFIED: Added
+from langchain_core.messages import HumanMessage, AIMessage # For memory if constructing manually, but buffer memory handles this
 
 # ---------------------------------------------------------------------------
 # ENVIRONMENT AND CONFIGURATION
 # ---------------------------------------------------------------------------
 
 def setup_environment():
-    """Loads environment variables from .env file."""
     load_dotenv()
-
-setup_environment() # Load environment variables at the start
-
-# --- Configuration for Data Loading ---
-DATA_FILE_PATH = "data/dataset_childrenbook.pdf" # Your chosen PDF [cite: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294]
+setup_environment()
 
 # ---------------------------------------------------------------------------
-# SECTION 1: TASK 1 - DATA LOADING (Cached)
+# SECTION 1: DATA LOADING (Dynamic based on Upload)
 # ---------------------------------------------------------------------------
-
-@st.cache_resource # Decorator to cache the loaded documents
-def load_all_documents(file_path):
-    """Loads documents from the specified PDF file path."""
+@st.cache_data(show_spinner="Processing PDF...")
+def load_documents_from_bytes(pdf_bytes, filename="uploaded_pdf"):
+    temp_file_path = None
     try:
-        loader = PyPDFLoader(file_path)
-        documents = loader.load_and_split() # PyPDFLoader can split pages [cite: 32]
-        st.success(f"Successfully loaded {len(documents)} pages from {os.path.basename(file_path)}.")
-        return documents
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(pdf_bytes)
+            temp_file_path = tmp_file.name
+        if temp_file_path:
+            loader = PyPDFLoader(temp_file_path)
+            documents = loader.load_and_split()
+            # Add filename to metadata for clarity if needed later, though PyPDFLoader adds 'source'
+            for doc in documents:
+                doc.metadata["source_filename"] = filename
+            st.success(f"Successfully processed '{filename}' into {len(documents)} pages/documents.")
+            return documents
+        else:
+            st.error("Could not create a temporary file for PDF processing.")
+            return []
     except Exception as e:
-        st.error(f"Error loading PDF file '{file_path}': {e}")
+        st.error(f"Error processing PDF file '{filename}': {e}")
         return []
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except Exception as e:
+                st.warning(f"Could not delete temporary file {temp_file_path}: {e}")
 
 # ---------------------------------------------------------------------------
-# SECTION 2: TASK 2 - SET UP RAG WITH LANGCHAIN (Cached)
+# SECTION 2: SET UP RAG WITH LANGCHAIN (Cached Resource)
 # ---------------------------------------------------------------------------
-
-@st.cache_resource # Decorator to cache the RAG pipeline
-def create_rag_pipeline_cached(_docs): # MODIFIED: Argument renamed to _docs
+@st.cache_resource(show_spinner="Building RAG pipeline with memory...")
+def create_rag_pipeline_for_docs(_docs, k_value):
     """
-    Sets up the RAG pipeline using the loaded documents.
-    Returns the retrieval_chain.
-    The _docs argument will not be hashed by Streamlit for caching.
+    Sets up the ConversationalRetrievalChain using the loaded documents and specified k_value.
+    Returns the conversational chain.
     """
-    if not _docs: # MODIFIED: Check _docs
+    if not _docs:
         st.error("No documents provided to create RAG pipeline.")
         return None
+    
+    st.info(f"Building conversational RAG pipeline with k={k_value}...")
 
-    # 1. Split Documents into Chunks
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    texts = text_splitter.split_documents(_docs) # MODIFIED: Use _docs
+    texts = text_splitter.split_documents(_docs)
     if not texts:
-        st.error("Text splitting resulted in no chunks. Check document content and splitter settings.")
+        st.error("Text splitting resulted in no chunks.")
         return None
-    st.info(f"Split documents into {len(texts)} chunks.")
+    st.info(f"Split documents into {len(texts)} chunks for vectorization.")
 
-    # 2. Create Embeddings using Google Gemini
     try:
         gemini_embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
     except Exception as e:
-        st.error(f"Failed to initialize Gemini Embeddings: {e}. Ensure GOOGLE_API_KEY is valid.")
+        st.error(f"Failed to initialize Gemini Embeddings: {e}.")
         return None
     st.info("Initialized GoogleGenerativeAIEmbeddings.")
 
-    # 3. Store in a Vector Store (FAISS)
     try:
         vectorstore = FAISS.from_documents(texts, gemini_embeddings)
-        st.info("Created FAISS vector store from document chunks.")
+        st.info("Created FAISS vector store.")
     except Exception as e:
         st.error(f"Error creating FAISS vector store: {e}")
         return None
 
-    # 4. Create a Retriever
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-    st.info("Created retriever from vector store.")
+    retriever = vectorstore.as_retriever(search_kwargs={"k": k_value}) 
+    st.info(f"Created retriever (k={k_value}).")
 
-    # 5. Set up the LLM and Prompt for the RAG chain
     try:
         llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest",
                                      temperature=0.3,
-                                     convert_system_message_to_human=True)
-        st.info("Initialized ChatGoogleGenerativeAI with gemini-1.5-flash-latest.")
+                                     convert_system_message_to_human=True) # This flag is for older versions, might not be needed or could be deprecated
+        st.info("Initialized ChatGoogleGenerativeAI for answering.")
     except Exception as e:
-        st.error(f"Failed to initialize ChatGoogleGenerativeAI: {e}. Check model name and API key.")
+        st.error(f"Failed to initialize ChatGoogleGenerativeAI: {e}.")
         return None
-        
-    prompt_template = """
-    You are a helpful assistant. Answer the following question based ONLY on the provided context.
-    If the answer is not found in the context, state that clearly. Do not make up information.
-
-    <context>
-    {context}
-    </context>
-
-    Question: {input}
-
-    Answer:
-    """
-    prompt = ChatPromptTemplate.from_template(prompt_template)
-
-    # 6. Create the RAG Chain
-    document_chain = create_stuff_documents_chain(llm, prompt)
-    retrieval_chain = create_retrieval_chain(retriever, document_chain)
-    st.success("RAG retrieval chain created successfully.")
     
-    return retrieval_chain
+    # MODIFIED: Setup memory for the conversation
+    # The memory object will be part of the returned chain, and thus part of the cached resource.
+    # Each new chain (due to new PDF or k change) will get its own fresh memory.
+    memory = ConversationBufferMemory(
+        memory_key="chat_history", 
+        return_messages=True, 
+        output_key='answer' # Important: ensures the LLM's answer is stored correctly in history
+    )
+
+    # Define the prompt for the document combining step (question answering)
+    # Note: ConversationalRetrievalChain might use slightly different variable names internally
+    # for context and question than a basic 'stuff' chain.
+    # We'll use a more generic prompt template suitable for it.
+    # The default prompt for ConversationalRetrievalChain is usually quite good.
+    # However, if we want to enforce "answer ONLY from context", we can customize.
+    
+    # This prompt is for the combine_docs_chain part of ConversationalRetrievalChain
+    prompt_template_str = """You are a helpful assistant. Use the following pieces of context to answer the question at the end.
+If you don't know the answer from the context, just say that you don't know, don't try to make up an answer.
+Keep the answer concise.
+
+Context:
+{context}
+
+Question: {question}
+
+Helpful Answer:"""
+    QA_PROMPT = PromptTemplate(template=prompt_template_str, input_variables=["context", "question"])
+
+    # MODIFIED: Create ConversationalRetrievalChain
+    conversational_chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=retriever,
+        memory=memory,
+        return_source_documents=True, # We want to see the source documents
+        # condense_question_llm=llm, # Optionally use a specific (or same) LLM for condensing the question
+        combine_docs_chain_kwargs={"prompt": QA_PROMPT}, # Pass our custom prompt
+        verbose=False # Set to True for debugging chain behavior
+    )
+    st.success("Conversational RAG chain created successfully.")
+    return conversational_chain
 
 # ---------------------------------------------------------------------------
-# SECTION 3: TASK 3 - CHATBOT INTERACTION LOGIC (Not cached, uses cached chain)
+# SECTION 3: CHATBOT INTERACTION LOGIC
 # ---------------------------------------------------------------------------
-
 def ask_chatbot_streamlit(query, chain):
-    """
-    Asks a question to the RAG chatbot and returns the answer.
-    Handles potential errors during invocation.
-    """
     if not chain:
-        return "Error: RAG chain is not initialized. Please check setup."
+        return "Error: RAG chain is not initialized. Please upload and process a PDF.", []
     
     try:
-        # Using st.spinner for a loading indicator during processing
-        with st.spinner(f"Processing your question: \"{query[:50]}...\""):
-            response = chain.invoke({"input": query})
-        answer = response.get("answer", "Could not extract answer from response.")
+        with st.spinner(f"Thinking... (using conversation history)"):
+            # The chain internally uses its memory object for chat_history
+            result = chain.invoke({"question": query}) 
+            answer = result.get("answer", "Could not extract answer from response.")
+            source_documents = result.get("source_documents", [])
         
-        # Optionally, display retrieved context in an expander for debugging/transparency
-        # if 'context' in response and response['context']:
-        #     with st.expander("View Retrieved Context"):
-        #         for i, doc_context in enumerate(response['context']):
-        #             st.write(f"**Snippet {i+1}:**")
-        #             st.caption(doc_context.page_content)
+        if source_documents:
+            with st.expander("View Retrieved Context Snippets"):
+                for i, doc_context in enumerate(source_documents):
+                    page_label = doc_context.metadata.get('page', 'N/A')
+                    source_filename = doc_context.metadata.get('source_filename', os.path.basename(doc_context.metadata.get('source', 'N/A')))
+                    st.write(f"**Snippet {i+1} (Source: {source_filename}, Page {page_label}):**")
+                    st.caption(doc_context.page_content)
         return answer
     except Exception as e:
         st.error(f"Error during chatbot query: {e}")
         return "An error occurred while processing your question."
 
 # ---------------------------------------------------------------------------
-# STREAMLIT APPLICATION UI
+# STREAMLIT APPLICATION UI 
+# (The run_streamlit_app function remains largely the same as the previous version,
+#  as the core logic changes are within create_rag_pipeline_for_docs and how the chain is called.
+#  The session state management for rag_chain, messages, current_pdf_name, processed_docs, 
+#  and current_k_value should still work correctly.)
 # ---------------------------------------------------------------------------
-
 def run_streamlit_app():
-    st.set_page_config(page_title="RAG Chatbot - Children's Book Paper", layout="wide")
-    st.title("📚 RAG Chatbot: Query the Research Paper")
-    st.caption(f"Powered by LangChain and Google Gemini, using the paper: {os.path.basename(DATA_FILE_PATH)}")
+    st.set_page_config(page_title="Conversational RAG Chatbot", layout="wide")
+    st.title("💬 Conversational RAG Chatbot")
+    st.caption("Upload a PDF, configure retrieval, and have a conversation about its content.")
 
-    # Check for API Key
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "rag_chain" not in st.session_state: # This will store our ConversationalRetrievalChain
+        st.session_state.rag_chain = None
+    if "current_pdf_name" not in st.session_state:
+        st.session_state.current_pdf_name = None
+    if "processed_docs" not in st.session_state: 
+        st.session_state.processed_docs = None
+    if "current_k_value" not in st.session_state: 
+        st.session_state.current_k_value = 3 
+
     if not os.getenv("GOOGLE_API_KEY"):
         st.error("🔴 FATAL: GOOGLE_API_KEY not found. Please set it in your .env file or Streamlit secrets.")
-        st.stop() # Stop execution if no API key
+        st.sidebar.error("API Key Missing!")
+        st.stop()
 
-    # Load documents and create RAG chain (these are cached)
-    # These will only run once unless the input (file_path) changes or cache is cleared.
-    docs = load_all_documents(DATA_FILE_PATH)
-    
-    if docs: # Only proceed if documents were loaded successfully
-        rag_chain_instance = create_rag_pipeline_cached(docs)
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        
+        k_value_input = st.number_input(
+            "Number of chunks (k) to retrieve:", 
+            min_value=1, max_value=10, value=st.session_state.current_k_value, step=1,
+            help="Number of relevant text chunks retrieved from the PDF to answer your question."
+        )
 
-        if rag_chain_instance:
-            st.sidebar.success("Chatbot is ready!")
-            st.sidebar.info(f"Knowledge Base: {os.path.basename(DATA_FILE_PATH)}")
+        st.header("📄 PDF Upload")
+        uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+
+        # Determine if context for RAG pipeline needs to be reset/rebuilt
+        rebuild_pipeline = False
+        if uploaded_file is not None and uploaded_file.name != st.session_state.current_pdf_name:
+            st.info(f"New PDF detected: '{uploaded_file.name}'.")
+            st.session_state.current_pdf_name = uploaded_file.name
+            st.session_state.processed_docs = None # Clear old docs
+            st.session_state.messages = [] # Reset chat for new PDF
+            rebuild_pipeline = True
+        
+        if k_value_input != st.session_state.current_k_value:
+            st.info(f"Retriever 'k' value changed to {k_value_input}.")
+            st.session_state.current_k_value = k_value_input
+            rebuild_pipeline = True # Rebuild if k changes
+
+        if rebuild_pipeline:
+            create_rag_pipeline_for_docs.clear() # Clear cache for the RAG pipeline function
+            st.session_state.rag_chain = None # Ensure old chain is cleared from session
+
+            if uploaded_file: # If new file caused rebuild, re-process it
+                 pdf_bytes = uploaded_file.getvalue()
+                 st.session_state.processed_docs = load_documents_from_bytes(pdf_bytes, uploaded_file.name)
             
-            # Initialize chat history in session state
-            if "messages" not in st.session_state:
-                st.session_state.messages = [{"role": "assistant", "content": "Hi! I'm a chatbot ready to answer questions about the research paper. How can I help you?"}]
+            # If only k changed, processed_docs should still be in session_state from previous load
 
-            # Display chat messages from history on app rerun
-            for message in st.session_state.messages:
-                with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
-            
-            # Accept user input
-            if prompt := st.chat_input("Ask a question about the paper..."):
-                # Add user message to chat history
-                st.session_state.messages.append({"role": "user", "content": prompt})
-                # Display user message in chat message container
-                with st.chat_message("user"):
-                    st.markdown(prompt)
-                
-                # Get assistant response
-                with st.chat_message("assistant"):
-                    response_text = ask_chatbot_streamlit(prompt, rag_chain_instance)
-                    st.markdown(response_text)
-                # Add assistant response to chat history
-                st.session_state.messages.append({"role": "assistant", "content": response_text})
-        else:
-            st.error("🔴 RAG chain initialization failed. Chatbot cannot proceed.")
+        # Build/Rebuild RAG chain if we have documents and (it's not built OR needs rebuild)
+        if st.session_state.processed_docs:
+            if st.session_state.rag_chain is None or rebuild_pipeline:
+                st.session_state.rag_chain = create_rag_pipeline_for_docs(
+                    st.session_state.processed_docs, 
+                    st.session_state.current_k_value
+                )
+        else: # No processed docs, so no chain
+            st.session_state.rag_chain = None
+        
+        if st.session_state.rag_chain:
+            st.success(f"Ready: '{st.session_state.current_pdf_name}' (k={st.session_state.current_k_value})")
+        elif st.session_state.current_pdf_name:
+            st.warning(f"Processed '{st.session_state.current_pdf_name}', but RAG setup incomplete/failed.")
+        
+    # Main chat interface
+    if not st.session_state.rag_chain:
+        st.info("Please upload a PDF and ensure settings are correct to begin chatting.")
     else:
-        st.error("🔴 No documents were loaded. Chatbot cannot proceed.")
-        st.info(f"Please ensure the data file '{DATA_FILE_PATH}' exists and is accessible.")
+        if not st.session_state.messages: # Initial message if chat is empty
+            st.session_state.messages.append(
+                {"role": "assistant", "content": f"Hi! I'm ready for a conversation about '{st.session_state.current_pdf_name}' (k={st.session_state.current_k_value}). How can I help?"}
+            )
+
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+        
+        if prompt := st.chat_input(f"Ask about '{st.session_state.current_pdf_name}'..."):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            with st.chat_message("assistant"):
+                # The ConversationalRetrievalChain handles history internally via its memory object
+                response_text = ask_chatbot_streamlit(prompt, st.session_state.rag_chain)
+                st.markdown(response_text)
+            st.session_state.messages.append({"role": "assistant", "content": response_text})
+            
+        if st.session_state.messages and len(st.session_state.messages) > 1:
+            if st.button("Clear Chat History for this PDF"):
+                # When clearing history, we also effectively reset the chain's internal memory
+                # by creating a new chain instance.
+                st.info("Clearing chat history and resetting conversation memory...")
+                create_rag_pipeline_for_docs.clear() # Clear the resource cache
+                # Rebuild the chain with fresh memory
+                if st.session_state.processed_docs:
+                    st.session_state.rag_chain = create_rag_pipeline_for_docs(
+                        st.session_state.processed_docs, 
+                        st.session_state.current_k_value
+                    )
+                
+                initial_message = {"role": "assistant", "content": f"Chat history cleared for '{st.session_state.current_pdf_name}' (k={st.session_state.current_k_value}). Let's start a new conversation!"}
+                st.session_state.messages = [initial_message] if st.session_state.rag_chain else []
+                st.rerun()
 
 if __name__ == "__main__":
     run_streamlit_app()
