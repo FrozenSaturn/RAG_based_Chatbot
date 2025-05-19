@@ -1,0 +1,17 @@
+Sample Questions and Chatbot Responses
+=======================================
+
+Question: What is the Goldilocks Principle mentioned in the paper?
+Answer: The Goldilocks Principle is the effect where there is an optimal size for memory representations between single words and entire sentences, that depends on the class of word to be predicted.
+
+Question: What is the Children's Book Test (CBT)?
+Answer: The Children's Book Test (CBT) is a new semantic language modeling benchmark designed to measure how well language models can exploit wider linguistic context. It is built from children's books available through Project Gutenberg.
+
+Question: According to the paper, how do Memory Networks compare to RNNs for predicting nouns?
+Answer: The best performing Memory Networks predict common nouns and named entities more accurately than conventional language models. LSTMs without attention perform similarly on nouns and named entities whether or not the context is available.
+
+Question: What dataset was used to build the CBT?
+Answer: The context states that the CBT is based on Project Gutenberg (but not children’s books, specifically).
+
+---------------------------------------
+Context Document: dataset_childrenbook.pdf
