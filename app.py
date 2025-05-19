@@ -52,19 +52,19 @@ def load_all_documents(file_path):
 # ---------------------------------------------------------------------------
 
 @st.cache_resource # Decorator to cache the RAG pipeline
-def create_rag_pipeline_cached(docs):
+def create_rag_pipeline_cached(_docs): # MODIFIED: Argument renamed to _docs
     """
     Sets up the RAG pipeline using the loaded documents.
     Returns the retrieval_chain.
-    This function will be cached by Streamlit.
+    The _docs argument will not be hashed by Streamlit for caching.
     """
-    if not docs:
+    if not _docs: # MODIFIED: Check _docs
         st.error("No documents provided to create RAG pipeline.")
         return None
 
     # 1. Split Documents into Chunks
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    texts = text_splitter.split_documents(docs)
+    texts = text_splitter.split_documents(_docs) # MODIFIED: Use _docs
     if not texts:
         st.error("Text splitting resulted in no chunks. Check document content and splitter settings.")
         return None
@@ -87,17 +87,14 @@ def create_rag_pipeline_cached(docs):
         return None
 
     # 4. Create a Retriever
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3}) # Retrieve top 3 relevant chunks
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
     st.info("Created retriever from vector store.")
 
     # 5. Set up the LLM and Prompt for the RAG chain
     try:
-        # Note: Using the model name from your provided main.py
-        # Verify "gemini-2.0-flash-lite" is a valid and available model name for the API.
-        # Common alternatives: "gemini-pro", "gemini-1.5-flash-latest"
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", # Changed to a likely valid model
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest",
                                      temperature=0.3,
-                                     convert_system_message_to_human=True) # This may show a UserWarning
+                                     convert_system_message_to_human=True)
         st.info("Initialized ChatGoogleGenerativeAI with gemini-1.5-flash-latest.")
     except Exception as e:
         st.error(f"Failed to initialize ChatGoogleGenerativeAI: {e}. Check model name and API key.")
